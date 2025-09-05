@@ -1,0 +1,109 @@
+import os
+import requests
+import pandas as pd
+import yfinance as yf
+import time
+import matplotlib.pyplot as plt
+
+# === Отримуємо дані з ENV (Render -> Environment Variables) ===
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+# Валютні пари (Yahoo Finance)
+SYMBOLS = ["EURUSD=X", "GBPUSD=X", "BTC-USD"]
+
+INTERVAL = "5m"   # таймфрейм
+PERIOD = "1d"     # історія (1 день)
+
+def send_message(message: str):
+    """Надсилає повідомлення в Telegram"""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, data=data)
+
+def send_photo(photo_path: str, caption: str = ""):
+    """Надсилає зображення в Telegram"""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    with open(photo_path, "rb") as photo:
+        files = {"photo": photo}
+        data = {"chat_id": CHAT_ID, "caption": caption}
+        requests.post(url, files=files, data=data)
+
+def get_data(symbol: str):
+    """Завантажує дані"""
+    data = yf.download(symbol, period=PERIOD, interval=INTERVAL)
+    return data
+
+def calculate_indicators(data: pd.DataFrame):
+    """Розрахунок SMA і RSI"""
+    data["SMA"] = data["Close"].rolling(window=14).mean()
+
+    delta = data["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    data["RSI"] = 100 - (100 / (1 + rs))
+    return data
+
+def strategy(data: pd.DataFrame):
+    """RSI + SMA стратегія"""
+    latest = data.iloc[-1]
+    signal = None
+
+    if latest["RSI"] < 30 and latest["Close"] > latest["SMA"]:
+        signal = "BUY"
+    elif latest["RSI"] > 70 and latest["Close"] < latest["SMA"]:
+        signal = "SELL"
+    return signal
+
+def plot_chart(symbol: str, data: pd.DataFrame, signal: str):
+    """Малює графік із ціною + SMA + RSI"""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10,8), sharex=True, gridspec_kw={'height_ratios':[3,1]})
+
+    # --- Ціна + SMA ---
+    ax1.plot(data.index, data["Close"], label="Ціна", color="blue")
+    ax1.plot(data.index, data["SMA"], label="SMA(14)", color="orange")
+
+    latest = data.iloc[-1]
+    if signal == "BUY":
+        ax1.scatter(latest.name, latest["Close"], color="green", marker="^", s=150, label="BUY")
+    elif signal == "SELL":
+        ax1.scatter(latest.name, latest["Close"], color="red", marker="v", s=150, label="SELL")
+
+    ax1.set_title(f"{symbol} - {signal if signal else 'WAIT'}")
+    ax1.set_ylabel("Ціна")
+    ax1.legend()
+    ax1.grid(True)
+
+    # --- RSI ---
+    ax2.plot(data.index, data["RSI"], label="RSI", color="purple")
+    ax2.axhline(70, color="red", linestyle="--", alpha=0.7)
+    ax2.axhline(30, color="green", linestyle="--", alpha=0.7)
+    ax2.set_ylabel("RSI")
+    ax2.set_xlabel("Час")
+    ax2.grid(True)
+
+    plt.tight_layout()
+
+    filename = f"{symbol}_signal.png"
+    plt.savefig(filename)
+    plt.close()
+    return filename
+
+# === Основний цикл ===
+while True:
+    try:
+        for sym in SYMBOLS:
+            df = get_data(sym)
+            df = calculate_indicators(df)
+            sig = strategy(df)
+
+            if sig:  # якщо BUY або SELL
+                chart_file = plot_chart(sym, df, sig)
+                send_photo(chart_file, caption=f"{sym}: {sig} сигнал 🚀")
+                os.remove(chart_file)
+
+        time.sleep(300)  # чекати 5 хвилин
+    except Exception as e:
+        send_message(f"❌ Помилка: {e}")
+        time.sleep(60)
